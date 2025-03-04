@@ -2,6 +2,20 @@
 #include <chrono>
 #include <cuda_runtime.h>
 
+#define BLOCK_SIZE 16 // Block size for CUDA kernel
+
+#define CHECK_CUDA_ERROR(call)                                               \
+    do                                                                       \
+    {                                                                        \
+        cudaError_t err = call;                                              \
+        if (err != cudaSuccess)                                              \
+        {                                                                    \
+            std::cerr << "CUDA Error: " << cudaGetErrorString(err)           \
+                      << " at " << __FILE__ << ":" << __LINE__ << std::endl; \
+            exit(EXIT_FAILURE);                                              \
+        }                                                                    \
+    } while (0)
+
 class Timer
 {
 public:
@@ -66,10 +80,11 @@ int main(int argc, char **argv)
     const int N = atoi(argv[3]);
 
     // Reset device
-    cudaDeviceReset();
-    float size_A = M * K * sizeof(float);
-    float size_B = K * N * sizeof(float);
-    float size_C = M * N * sizeof(float);
+    CHECK_CUDA_ERROR(cudaDeviceReset());
+
+    size_t size_A = M * K * sizeof(float);
+    size_t size_B = K * N * sizeof(float);
+    size_t size_C = M * N * sizeof(float);
 
     // Host matrices
     float *h_A = (float *)malloc(size_A);
@@ -86,24 +101,24 @@ int main(int argc, char **argv)
         h_B[i] = (float)(i + 1); // Initialize B with values 1 to K*N
     }
 
-    std::cout << "Matrix A:" << std::endl;
-    for (int i = 0; i < M; i++)
-    {
-        for (int j = 0; j < K; j++)
-        {
-            std::cout << h_A[i * K + j] << " ";
-        }
-        std::cout << std::endl;
-    }
-    std::cout << "Matrix B:" << std::endl;
-    for (int i = 0; i < K; i++)
-    {
-        for (int j = 0; j < N; j++)
-        {
-            std::cout << h_B[i * N + j] << " ";
-        }
-        std::cout << std::endl;
-    }
+    // std::cout << "Matrix A:" << std::endl;
+    // for (int i = 0; i < M; i++)
+    // {
+    //     for (int j = 0; j < K; j++)
+    //     {
+    //         std::cout << h_A[i * K + j] << " ";
+    //     }
+    //     std::cout << std::endl;
+    // }
+    // std::cout << "Matrix B:" << std::endl;
+    // for (int i = 0; i < K; i++)
+    // {
+    //     for (int j = 0; j < N; j++)
+    //     {
+    //         std::cout << h_B[i * N + j] << " ";
+    //     }
+    //     std::cout << std::endl;
+    // }
 
     // ======= CPU Execution ==========
     Timer cpu_timer;
@@ -114,14 +129,14 @@ int main(int argc, char **argv)
     // ======= GPU Execution ==========
     // Device matrices
     float *d_A, *d_B, *d_C;
-    cudaMalloc((void **)&d_A, size_A);
-    cudaMalloc((void **)&d_B, size_B);
-    cudaMalloc((void **)&d_C, size_C);
+    CHECK_CUDA_ERROR(cudaMalloc(&d_A, size_A));
+    CHECK_CUDA_ERROR(cudaMalloc(&d_B, size_B));
+    CHECK_CUDA_ERROR(cudaMalloc(&d_C, size_C));
     // Copy data from host to device
-    cudaMemcpy(d_A, h_A, size_A, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_B, h_B, size_B, cudaMemcpyHostToDevice);
+    CHECK_CUDA_ERROR(cudaMemcpy(d_A, h_A, size_A, cudaMemcpyHostToDevice));
+    CHECK_CUDA_ERROR(cudaMemcpy(d_B, h_B, size_B, cudaMemcpyHostToDevice));
     // Define execution configuration
-    dim3 threadsPerBlock(32, 32); // threads per block
+    dim3 threadsPerBlock(BLOCK_SIZE, BLOCK_SIZE); // threads per block
     dim3 numBlocks((N + threadsPerBlock.x - 1) / threadsPerBlock.x,
                    (M + threadsPerBlock.y - 1) / threadsPerBlock.y);
 
@@ -129,11 +144,26 @@ int main(int argc, char **argv)
     Timer timer;
     timer.reset();
     matrixMultiplyGPU<<<numBlocks, threadsPerBlock>>>(d_A, d_B, d_C, M, K, N);
-    cudaDeviceSynchronize();
+    // Synchronize to ensure kernel execution
+    CHECK_CUDA_ERROR(cudaDeviceSynchronize());
+    // Check for kernel launch errors
+    CHECK_CUDA_ERROR(cudaGetLastError());
     double gpu_time_taken = timer.elapsed();
 
     // Copy result back to host
-    cudaMemcpy(h_C_GPU, d_C, size_C, cudaMemcpyDeviceToHost);
+    CHECK_CUDA_ERROR(cudaMemcpy(h_C_GPU, d_C, size_C, cudaMemcpyDeviceToHost));
+
+    // compare the results from CPU and GPU
+    bool isEqual = true;
+    for (int i = 0; i < M * N; i++)
+    {
+        if (int(h_C_CPU[i]) != int(h_C_GPU[i]))
+        {
+            isEqual = false;
+            std::cout << "Mismatch at index " << i << ": CPU = " << h_C_CPU[i] << ", GPU = " << h_C_GPU[i] << std::endl;
+        }
+    }
+    std::cout << "Results are " << (isEqual ? "equal" : "not equal") << std::endl;
 
     // Print a small portion of result matrices for verification
     // std::cout << "Matrix C (CPU result, first 5 elements): ";
@@ -141,8 +171,8 @@ int main(int argc, char **argv)
     //     std::cout << h_C_CPU[i] << " ";
     // std::cout << std::endl;
 
-    // std::cout << "Matrix C (GPU result, first 5 elements): ";
-    // for (int i = 0; i < std::min(5, M * N); i++)
+    // std::cout << "Matrix C (GPU result, first 100 elements): ";
+    // for (int i = 0; i < std::min(100, M * N); i++)
     //     std::cout << h_C_GPU[i] << " ";
     // std::cout << std::endl;
 
@@ -150,9 +180,9 @@ int main(int argc, char **argv)
     std::cout << "GPU Time taken: " << gpu_time_taken << " seconds" << std::endl;
 
     // Free device memory
-    cudaFree(d_A);
-    cudaFree(d_B);
-    cudaFree(d_C);
+    CHECK_CUDA_ERROR(cudaFree(d_A));
+    CHECK_CUDA_ERROR(cudaFree(d_B));
+    CHECK_CUDA_ERROR(cudaFree(d_C));
     // Free host memory
     free(h_A);
     free(h_B);
